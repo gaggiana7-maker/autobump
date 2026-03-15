@@ -8,7 +8,8 @@
   },
   "dependencies": {
     "discord.js-selfbot-v13": "^3.7.1",
-    "undici": "5.28.4"
+    "undici": "5.28.4",
+    "debug": "^4.3.4"
   },
   "overrides": {
     "undici": "5.28.4"
