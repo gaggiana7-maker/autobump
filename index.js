@@ -1,252 +1,167 @@
 'use strict';
 
 // ============================================================
-//  DISBOARD AUTO BUMPER
-//  - Slash command reale (non testo)
-//  - Delay random 1-10 min dopo le 2 ore
-//  - Retry automatico su errori (max 5 tentativi)
-//  - Reconnect automatico se va offline
-//  - Log dettagliato di tutto
-//  - Gestione cooldown Disboard
-//  - Gestione errori completa
+//  DISBOARD AUTO BUMPER - 3 TOKEN / 3 SERVER
+//  - Token 1 bumpa, 40 min dopo Token 2, 40 min dopo Token 3
+//  - Ciclo totale: ogni 2 ore (40+40+40 = 120 min)
+//  - Delay random 1-10 min dopo il ciclo completo
+//  - Retry automatico su errori
+//  - Log dettagliato
 // ============================================================
 
 const { Client } = require('discord.js-selfbot-v13');
 
 // ─── CONFIG ────────────────────────────────────────────────
-const TOKEN       = process.env.TOKEN;
-const CHANNEL_ID  = process.env.CHANNEL_ID;
-const DISBOARD_ID = '302050872383242240';
+const ACCOUNTS = [
+    { token: process.env.TOKEN_1, channelId: process.env.CHANNEL_ID_1, label: 'Account 1' },
+    { token: process.env.TOKEN_2, channelId: process.env.CHANNEL_ID_2, label: 'Account 2' },
+    { token: process.env.TOKEN_3, channelId: process.env.CHANNEL_ID_3, label: 'Account 3' },
+];
 
-const BUMP_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 ore
-const DELAY_MIN_MS     = 1 * 60 * 1000;       // 1 minuto minimo
-const DELAY_MAX_MS     = 10 * 60 * 1000;      // 10 minuti massimo
-const MAX_RETRIES      = 5;
-const RETRY_DELAY_MS   = 30 * 1000;           // 30s tra retry
+const DISBOARD_ID    = '302050872383242240';
+const INTERVAL_MS    = 40 * 60 * 1000; // 40 minuti tra ogni bump
+const DELAY_MIN_MS   = 1  * 60 * 1000;
+const DELAY_MAX_MS   = 10 * 60 * 1000;
+const MAX_RETRIES    = 5;
+const RETRY_DELAY_MS = 30 * 1000;
 // ───────────────────────────────────────────────────────────
 
 // ─── UTILITIES ─────────────────────────────────────────────
-function log(level, msg) {
-    const time = new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
-    const icons = {
-        INFO:  '📋',
-        OK:    '✅',
-        WARN:  '⚠️ ',
-        ERROR: '❌',
-        WAIT:  '⏳',
-        BUMP:  '🚀',
-    };
-    console.log(`[${time}] ${icons[level] || '•'} [${level}] ${msg}`);
+function log(level, label, msg) {
+    const time  = new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
+    const icons = { INFO: '📋', OK: '✅', WARN: '⚠️ ', ERROR: '❌', WAIT: '⏳', BUMP: '🚀' };
+    console.log(`[${time}] ${icons[level] || '•'} [${level}] [${label}] ${msg}`);
 }
 
 function randomDelay() {
     return Math.floor(Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS + 1)) + DELAY_MIN_MS;
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function formatTime(ms) {
-    const totalSeconds = Math.floor(ms / 1000);
-    const hours   = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    return `${hours}h ${minutes}m ${seconds}s`;
+    const s = Math.floor(ms / 1000);
+    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
 }
 // ───────────────────────────────────────────────────────────
 
-// ─── VALIDAZIONE VARIABILI ──────────────────────────────────
-if (!TOKEN) {
-    log('ERROR', "TOKEN mancante! Aggiungilo nelle variabili d'ambiente Railway.");
-    process.exit(1);
-}
-if (!CHANNEL_ID) {
-    log('ERROR', "CHANNEL_ID mancante! Aggiungilo nelle variabili d'ambiente Railway.");
-    process.exit(1);
-}
+// ─── VALIDAZIONE ───────────────────────────────────────────
+ACCOUNTS.forEach((acc, i) => {
+    if (!acc.token)     { console.error(`❌ TOKEN_${i+1} mancante!`);     process.exit(1); }
+    if (!acc.channelId) { console.error(`❌ CHANNEL_ID_${i+1} mancante!`); process.exit(1); }
+});
 // ───────────────────────────────────────────────────────────
 
-// ─── CLIENT SETUP ──────────────────────────────────────────
-const client = new Client({ checkUpdate: false });
+// ─── STATS ─────────────────────────────────────────────────
+const stats = ACCOUNTS.map(a => ({ label: a.label, bumps: 0, fails: 0 }));
 // ───────────────────────────────────────────────────────────
 
-// ─── STATO GLOBALE ─────────────────────────────────────────
-let bumpCount    = 0;
-let failCount    = 0;
-let lastBumpTime = null;
-let isRunning    = false;
+// ─── CREA CLIENT ───────────────────────────────────────────
+const clients = ACCOUNTS.map(acc => {
+    const client = new Client({ checkUpdate: false });
+    client.on('ready', () => log('OK',    acc.label, `Connesso come ${client.user.tag}`));
+    client.on('error', e  => log('ERROR', acc.label, `Errore client: ${e.message}`));
+    client.on('warn',  m  => log('WARN',  acc.label, m));
+    return client;
+});
 // ───────────────────────────────────────────────────────────
 
-// ─── FUNZIONE BUMP ──────────────────────────────────────────
-async function doBump() {
-    // Prova a prendere il canale dalla cache
-    let channel = client.channels.cache.get(CHANNEL_ID);
-
-    // Se non è in cache, prova a fetcharlo
-    if (!channel) {
-        log('WARN', `Canale non in cache, tento fetch...`);
+// ─── LOGIN ─────────────────────────────────────────────────
+async function loginAll() {
+    for (let i = 0; i < ACCOUNTS.length; i++) {
         try {
-            channel = await client.channels.fetch(CHANNEL_ID);
+            log('INFO', ACCOUNTS[i].label, 'Login...');
+            await clients[i].login(ACCOUNTS[i].token);
+            await sleep(3000);
         } catch (e) {
-            log('ERROR', `Impossibile fetchare il canale: ${e.message}`);
-            return { success: false, fatal: false };
+            log('ERROR', ACCOUNTS[i].label, `Login fallito: ${e.message}`);
+            process.exit(1);
         }
     }
+    log('INFO', 'SISTEMA', '✅ Tutti connessi!');
+}
+// ───────────────────────────────────────────────────────────
 
+// ─── BUMP ──────────────────────────────────────────────────
+async function doBump(i) {
+    const acc = ACCOUNTS[i], client = clients[i], stat = stats[i];
+
+    let channel = client.channels.cache.get(acc.channelId);
     if (!channel) {
-        log('ERROR', 'Canale ancora null dopo fetch. Controlla CHANNEL_ID.');
-        return { success: false, fatal: true };
+        try { channel = await client.channels.fetch(acc.channelId); }
+        catch (e) { log('ERROR', acc.label, `Fetch canale fallito: ${e.message}`); return { success: false, fatal: false }; }
     }
+    if (!channel) { log('ERROR', acc.label, 'Canale non trovato!'); return { success: false, fatal: true }; }
 
-    const guild = channel.guild;
-    if (!guild) {
-        log('ERROR', 'Guild non trovata per questo canale.');
-        return { success: false, fatal: true };
-    }
-
-    log('BUMP', `Eseguo /bump nel canale #${channel.name} — server: ${guild.name}`);
+    log('BUMP', acc.label, `Eseguo /bump in #${channel.name} (${channel.guild?.name})...`);
 
     try {
         await channel.sendSlash(DISBOARD_ID, 'bump');
-        bumpCount++;
-        lastBumpTime = new Date();
-        log('OK', `Bump #${bumpCount} eseguito con successo! (${lastBumpTime.toLocaleString('it-IT')})`);
+        stat.bumps++;
+        log('OK', acc.label, `Bump #${stat.bumps} eseguito! (${new Date().toLocaleString('it-IT')})`);
         return { success: true, fatal: false };
-
-    } catch (err) {
-        const msg = err.message || '';
-        log('ERROR', `Errore sendSlash: ${msg}`);
-
-        // Cooldown Disboard attivo
-        if (msg.includes('cooldown') || msg.includes('wait') || msg.includes('You need to wait')) {
-            log('WARN', 'Disboard in cooldown — aspetto 5 minuti e riprovo...');
-            await sleep(5 * 60 * 1000);
-            return { success: false, fatal: false };
-        }
-
-        // Permessi mancanti
-        if (msg.includes('Missing Permissions') || msg.includes('permission')) {
-            log('ERROR', 'Permessi mancanti! Controlla che l\'account possa usare slash nel canale.');
-            return { success: false, fatal: true };
-        }
-
-        // Canale non trovato
-        if (msg.includes('Unknown Channel')) {
-            log('ERROR', 'Canale non trovato da Discord. Controlla CHANNEL_ID.');
-            return { success: false, fatal: true };
-        }
-
-        // Bot Disboard non presente
-        if (msg.includes('Unknown Application') || msg.includes('Unknown Interaction')) {
-            log('ERROR', 'Disboard non trovato nel server. È presente nel server?');
-            return { success: false, fatal: true };
-        }
-
-        // Token non valido
-        if (msg.includes('401') || msg.includes('Invalid token') || msg.includes('Unauthorized')) {
-            log('ERROR', 'Token non valido o scaduto! Aggiorna TOKEN nelle variabili.');
-            return { success: false, fatal: true };
-        }
-
-        // Errore generico non fatale
+    } catch (e) {
+        const m = e.message || '';
+        log('ERROR', acc.label, `Errore: ${m}`);
+        if (m.includes('cooldown') || m.includes('wait')) { await sleep(5 * 60 * 1000); return { success: false, fatal: false }; }
+        if (m.includes('Missing Permissions'))             { return { success: false, fatal: true }; }
+        if (m.includes('Unknown Channel'))                 { return { success: false, fatal: true }; }
+        if (m.includes('401') || m.includes('Invalid token')) { log('ERROR', acc.label, 'Token scaduto! Aggiorna in Railway.'); return { success: false, fatal: true }; }
         return { success: false, fatal: false };
     }
+}
+
+async function bumpWithRetry(i) {
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        if (attempt > 1) { log('WARN', ACCOUNTS[i].label, `Tentativo ${attempt}/${MAX_RETRIES}...`); await sleep(RETRY_DELAY_MS); }
+        const { success, fatal } = await doBump(i);
+        if (success) return;
+        if (fatal)   { process.exit(1); }
+    }
+    stats[i].fails++;
+    log('ERROR', ACCOUNTS[i].label, `Bump fallito dopo ${MAX_RETRIES} tentativi.`);
 }
 // ───────────────────────────────────────────────────────────
 
 // ─── LOOP PRINCIPALE ────────────────────────────────────────
-async function bumpLoop() {
-    if (isRunning) return;
-    isRunning = true;
+async function mainLoop() {
+    log('INFO', 'SISTEMA', '═══════════════════════════════════════');
+    log('INFO', 'SISTEMA', '   DISBOARD AUTO BUMPER 3x AVVIATO    ');
+    log('INFO', 'SISTEMA', '   Intervallo tra bump: 40 minuti     ');
+    log('INFO', 'SISTEMA', '   Ciclo completo: ~2 ore             ');
+    log('INFO', 'SISTEMA', '═══════════════════════════════════════');
 
-    log('INFO', '═══════════════════════════════════════');
-    log('INFO', '       DISBOARD AUTO BUMPER AVVIATO    ');
-    log('INFO', `  Canale ID : ${CHANNEL_ID}`);
-    log('INFO', `  Intervallo: 2 ore + random 1-10 min  `);
-    log('INFO', '═══════════════════════════════════════');
-
-    // Piccolo delay iniziale per stabilizzare la connessione
-    log('WAIT', 'Attendo 5 secondi prima del primo bump...');
     await sleep(5000);
+    let cycle = 0;
 
     while (true) {
-        let success = false;
-        let attempts = 0;
-        let fatal = false;
+        cycle++;
+        log('INFO', 'SISTEMA', `─── CICLO #${cycle} ───`);
 
-        // ── Retry loop ──────────────────────────────────────
-        while (!success && !fatal && attempts < MAX_RETRIES) {
-            attempts++;
+        for (let i = 0; i < ACCOUNTS.length; i++) {
+            await bumpWithRetry(i);
 
-            if (attempts > 1) {
-                log('WARN', `Tentativo ${attempts}/${MAX_RETRIES} tra ${RETRY_DELAY_MS / 1000}s...`);
-                await sleep(RETRY_DELAY_MS);
+            if (i < ACCOUNTS.length - 1) {
+                const next = new Date(Date.now() + INTERVAL_MS).toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
+                log('WAIT', 'SISTEMA', `Prossimo bump (${ACCOUNTS[i+1].label}) tra ${formatTime(INTERVAL_MS)} (alle ${next})`);
+                await sleep(INTERVAL_MS);
             }
-
-            const result = await doBump();
-            success = result.success;
-            fatal   = result.fatal;
-        }
-        // ────────────────────────────────────────────────────
-
-        if (!success) {
-            failCount++;
-            if (fatal) {
-                log('ERROR', `Errore fatale! Controlla la configurazione. Il bot si ferma.`);
-                process.exit(1);
-            }
-            log('ERROR', `Bump fallito dopo ${MAX_RETRIES} tentativi. Totale fallimenti: ${failCount}`);
         }
 
-        // ── Calcolo prossimo bump ────────────────────────────
-        const extra   = randomDelay();
-        const total   = BUMP_INTERVAL_MS + extra;
-        const nextStr = new Date(Date.now() + total).toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
+        // Stats fine ciclo
+        log('INFO', 'SISTEMA', '─── STATS ───');
+        stats.forEach(s => log('INFO', s.label, `✅ ${s.bumps} bumps | ❌ ${s.fails} falliti`));
 
-        log('WAIT', `Prossimo bump tra ${formatTime(total)} (alle ${nextStr})`);
-        log('INFO', `Stats: ✅ Bump riusciti: ${bumpCount} | ❌ Falliti: ${failCount}`);
-        log('INFO', '───────────────────────────────────────');
-
-        await sleep(total);
+        // Delay random prima del prossimo ciclo
+        const extra = randomDelay();
+        const next  = new Date(Date.now() + extra).toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
+        log('WAIT', 'SISTEMA', `Ciclo completato! Prossimo tra ${formatTime(extra)} (alle ${next})`);
+        await sleep(extra);
     }
 }
 // ───────────────────────────────────────────────────────────
 
-// ─── EVENTI CLIENT ──────────────────────────────────────────
-client.on('ready', async () => {
-    log('OK', `Connesso come ${client.user.tag} (${client.user.id})`);
-    bumpLoop();
-});
+process.on('unhandledRejection', e => console.error('❌ Rejection:', e?.message));
+process.on('uncaughtException',  e => console.error('❌ Exception:', e?.message));
 
-client.on('disconnect', () => {
-    log('WARN', 'Client disconnesso da Discord.');
-    isRunning = false;
-});
-
-client.on('error', (err) => {
-    log('ERROR', `Errore client: ${err.message}`);
-});
-
-client.on('warn', (msg) => {
-    log('WARN', `Warning client: ${msg}`);
-});
-
-// Gestione crash inaspettati
-process.on('unhandledRejection', (err) => {
-    log('ERROR', `Unhandled rejection: ${err?.message || err}`);
-});
-
-process.on('uncaughtException', (err) => {
-    log('ERROR', `Uncaught exception: ${err?.message || err}`);
-});
-// ───────────────────────────────────────────────────────────
-
-// ─── LOGIN ──────────────────────────────────────────────────
-log('INFO', 'Connessione a Discord...');
-client.login(TOKEN).catch(err => {
-    log('ERROR', `Login fallito: ${err.message}`);
-    log('ERROR', 'Controlla che il TOKEN sia corretto.');
-    process.exit(1);
-});
-// ───────────────────────────────────────────────────────────
+(async () => { await loginAll(); await mainLoop(); })();
