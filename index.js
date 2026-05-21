@@ -16,6 +16,7 @@ const ACCOUNTS = [
     { token: process.env.TOKEN_1, channelId: process.env.CHANNEL_ID_1, label: 'Account 1' },
     { token: process.env.TOKEN_2, channelId: process.env.CHANNEL_ID_2, label: 'Account 2' },
     { token: process.env.TOKEN_3, channelId: process.env.CHANNEL_ID_3, label: 'Account 3' },
+    { token: process.env.TOKEN_4, channelId: process.env.CHANNEL_ID_4, label: 'Account 4' },
 ];
 
 const DISBOARD_ID    = '302050872383242240';
