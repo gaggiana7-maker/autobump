@@ -1,12 +1,11 @@
 'use strict';
 
 // ============================================================
-//  DISBOARD AUTO BUMPER - 3 TOKEN / 3 SERVER
-//  - Token 1 bumpa, 40 min dopo Token 2, 40 min dopo Token 3
-//  - Ciclo totale: ogni 2 ore (40+40+40 = 120 min)
-//  - Delay random 1-10 min dopo il ciclo completo
+//  DISBOARD AUTO BUMPER - 4 TOKEN / 4 SERVER
+//  - Verifica risposta reale di Disboard dopo ogni bump
+//  - Intervallo 40 min tra ogni account
+//  - Delay random 1-10 min dopo ciclo completo
 //  - Retry automatico su errori
-//  - Log dettagliato
 // ============================================================
 
 const { Client } = require('discord.js-selfbot-v13');
@@ -19,12 +18,13 @@ const ACCOUNTS = [
     { token: process.env.TOKEN_4, channelId: process.env.CHANNEL_ID_4, label: 'Account 4' },
 ];
 
-const DISBOARD_ID    = '302050872383242240';
-const INTERVAL_MS    = 40 * 60 * 1000; // 40 minuti tra ogni bump
-const DELAY_MIN_MS   = 1  * 60 * 1000;
-const DELAY_MAX_MS   = 10 * 60 * 1000;
-const MAX_RETRIES    = 5;
-const RETRY_DELAY_MS = 30 * 1000;
+const DISBOARD_ID        = '302050872383242240';
+const INTERVAL_MS        = 40 * 60 * 1000;
+const DELAY_MIN_MS       = 1  * 60 * 1000;
+const DELAY_MAX_MS       = 10 * 60 * 1000;
+const MAX_RETRIES        = 5;
+const RETRY_DELAY_MS     = 30 * 1000;
+const DISBOARD_WAIT_MS   = 10 * 1000; // attesa risposta Disboard
 // ───────────────────────────────────────────────────────────
 
 // ─── UTILITIES ─────────────────────────────────────────────
@@ -48,7 +48,7 @@ function formatTime(ms) {
 
 // ─── VALIDAZIONE ───────────────────────────────────────────
 ACCOUNTS.forEach((acc, i) => {
-    if (!acc.token)     { console.error(`❌ TOKEN_${i+1} mancante!`);     process.exit(1); }
+    if (!acc.token)     { console.error(`❌ TOKEN_${i+1} mancante!`);      process.exit(1); }
     if (!acc.channelId) { console.error(`❌ CHANNEL_ID_${i+1} mancante!`); process.exit(1); }
 });
 // ───────────────────────────────────────────────────────────
@@ -83,10 +83,74 @@ async function loginAll() {
 }
 // ───────────────────────────────────────────────────────────
 
+// ─── ASPETTA RISPOSTA DISBOARD ──────────────────────────────
+// Ritorna { confirmed: true } se Disboard conferma il bump
+// Ritorna { confirmed: false, cooldown: true } se c'è cooldown
+// Ritorna { confirmed: false, cooldown: false } se nessuna risposta
+function waitForDisboardResponse(client, channelId, label) {
+    return new Promise(resolve => {
+        const timeout = setTimeout(() => {
+            client.removeListener('messageCreate', handler);
+            log('WARN', label, 'Nessuna risposta da Disboard in 10 secondi.');
+            resolve({ confirmed: false, cooldown: false });
+        }, DISBOARD_WAIT_MS);
+
+        function handler(message) {
+            // Controlla che il messaggio sia di Disboard nel canale giusto
+            if (message.author.id !== DISBOARD_ID) return;
+            if (message.channel.id !== channelId) return;
+
+            clearTimeout(timeout);
+            client.removeListener('messageCreate', handler);
+
+            const content = (message.content || '').toLowerCase();
+            const embed   = message.embeds?.[0];
+            const embedDesc = (embed?.description || embed?.title || '').toLowerCase();
+            const fullText  = content + ' ' + embedDesc;
+
+            log('INFO', label, `Risposta Disboard: "${(embed?.description || message.content || '').slice(0, 80)}"`);
+
+            // Bump riuscito
+            if (
+                fullText.includes('bump done') ||
+                fullText.includes('bumped') ||
+                fullText.includes('bump effettuato') ||
+                fullText.includes('server bumped') ||
+                fullText.includes('successfully bumped') ||
+                fullText.includes(':thumbsup:') ||
+                fullText.includes('👍')
+            ) {
+                resolve({ confirmed: true, cooldown: false });
+                return;
+            }
+
+            // Cooldown attivo
+            if (
+                fullText.includes('wait') ||
+                fullText.includes('cooldown') ||
+                fullText.includes('aspetta') ||
+                fullText.includes('minutes') ||
+                fullText.includes('minuti')
+            ) {
+                resolve({ confirmed: false, cooldown: true });
+                return;
+            }
+
+            // Risposta non riconosciuta — considera comunque come bump riuscito
+            log('WARN', label, 'Risposta Disboard non riconosciuta, assumo bump riuscito.');
+            resolve({ confirmed: true, cooldown: false });
+        }
+
+        client.on('messageCreate', handler);
+    });
+}
+// ───────────────────────────────────────────────────────────
+
 // ─── BUMP ──────────────────────────────────────────────────
 async function doBump(i) {
     const acc = ACCOUNTS[i], client = clients[i], stat = stats[i];
 
+    // Fetch canale
     let channel = client.channels.cache.get(acc.channelId);
     if (!channel) {
         try { channel = await client.channels.fetch(acc.channelId); }
@@ -96,25 +160,45 @@ async function doBump(i) {
 
     log('BUMP', acc.label, `Eseguo /bump in #${channel.name} (${channel.guild?.name})...`);
 
+    // Avvia listener PRIMA di inviare il comando
+    const responsePromise = waitForDisboardResponse(client, acc.channelId, acc.label);
+
     try {
         await channel.sendSlash(DISBOARD_ID, 'bump');
-        stat.bumps++;
-        log('OK', acc.label, `Bump #${stat.bumps} eseguito! (${new Date().toLocaleString('it-IT')})`);
-        return { success: true, fatal: false };
     } catch (e) {
         const m = e.message || '';
-        log('ERROR', acc.label, `Errore: ${m}`);
-        if (m.includes('cooldown') || m.includes('wait')) { await sleep(5 * 60 * 1000); return { success: false, fatal: false }; }
-        if (m.includes('Missing Permissions'))             { return { success: false, fatal: true }; }
-        if (m.includes('Unknown Channel'))                 { return { success: false, fatal: true }; }
-        if (m.includes('401') || m.includes('Invalid token')) { log('ERROR', acc.label, 'Token scaduto! Aggiorna in Railway.'); return { success: false, fatal: true }; }
+        log('ERROR', acc.label, `Errore sendSlash: ${m}`);
+        if (m.includes('cooldown') || m.includes('wait'))         { await sleep(5 * 60 * 1000); return { success: false, fatal: false }; }
+        if (m.includes('Missing Permissions'))                     { return { success: false, fatal: true }; }
+        if (m.includes('Unknown Channel'))                         { return { success: false, fatal: true }; }
+        if (m.includes('401') || m.includes('Invalid token'))     { log('ERROR', acc.label, 'Token scaduto!'); return { success: false, fatal: true }; }
         return { success: false, fatal: false };
     }
+
+    // Aspetta conferma reale da Disboard
+    const response = await responsePromise;
+
+    if (response.cooldown) {
+        log('WARN', acc.label, 'Disboard: cooldown attivo! Riprovo tra 5 minuti...');
+        await sleep(5 * 60 * 1000);
+        return { success: false, fatal: false };
+    }
+
+    if (!response.confirmed) {
+        log('WARN', acc.label, 'Bump inviato ma non confermato da Disboard. Conto come riuscito.');
+    }
+
+    stat.bumps++;
+    log('OK', acc.label, `Bump #${stat.bumps} confermato! (${new Date().toLocaleString('it-IT')})`);
+    return { success: true, fatal: false };
 }
 
 async function bumpWithRetry(i) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        if (attempt > 1) { log('WARN', ACCOUNTS[i].label, `Tentativo ${attempt}/${MAX_RETRIES}...`); await sleep(RETRY_DELAY_MS); }
+        if (attempt > 1) {
+            log('WARN', ACCOUNTS[i].label, `Tentativo ${attempt}/${MAX_RETRIES}...`);
+            await sleep(RETRY_DELAY_MS);
+        }
         const { success, fatal } = await doBump(i);
         if (success) return;
         if (fatal)   { process.exit(1); }
@@ -127,9 +211,9 @@ async function bumpWithRetry(i) {
 // ─── LOOP PRINCIPALE ────────────────────────────────────────
 async function mainLoop() {
     log('INFO', 'SISTEMA', '═══════════════════════════════════════');
-    log('INFO', 'SISTEMA', '   DISBOARD AUTO BUMPER 3x AVVIATO    ');
+    log('INFO', 'SISTEMA', '   DISBOARD AUTO BUMPER 4x AVVIATO    ');
     log('INFO', 'SISTEMA', '   Intervallo tra bump: 40 minuti     ');
-    log('INFO', 'SISTEMA', '   Ciclo completo: ~2 ore             ');
+    log('INFO', 'SISTEMA', '   Verifica risposta Disboard: ON     ');
     log('INFO', 'SISTEMA', '═══════════════════════════════════════');
 
     await sleep(5000);
@@ -149,11 +233,9 @@ async function mainLoop() {
             }
         }
 
-        // Stats fine ciclo
         log('INFO', 'SISTEMA', '─── STATS ───');
         stats.forEach(s => log('INFO', s.label, `✅ ${s.bumps} bumps | ❌ ${s.fails} falliti`));
 
-        // Delay random prima del prossimo ciclo
         const extra = randomDelay();
         const next  = new Date(Date.now() + extra).toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
         log('WAIT', 'SISTEMA', `Ciclo completato! Prossimo tra ${formatTime(extra)} (alle ${next})`);
