@@ -226,20 +226,15 @@ async function mainLoop() {
         for (let i = 0; i < ACCOUNTS.length; i++) {
             await bumpWithRetry(i);
 
-            if (i < ACCOUNTS.length - 1) {
-                const next = new Date(Date.now() + INTERVAL_MS).toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
-                log('WAIT', 'SISTEMA', `Prossimo bump (${ACCOUNTS[i+1].label}) tra ${formatTime(INTERVAL_MS)} (alle ${next})`);
-                await sleep(INTERVAL_MS);
-            }
+            const isLast  = i === ACCOUNTS.length - 1;
+            const nextLbl = isLast ? ACCOUNTS[0].label : ACCOUNTS[i+1].label;
+            const nextAt  = new Date(Date.now() + INTERVAL_MS).toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
+            log('WAIT', 'SISTEMA', `Prossimo bump (${nextLbl}) tra ${formatTime(INTERVAL_MS)} (alle ${nextAt})`);
+            await sleep(INTERVAL_MS);
         }
 
         log('INFO', 'SISTEMA', '─── STATS ───');
         stats.forEach(s => log('INFO', s.label, `✅ ${s.bumps} bumps | ❌ ${s.fails} falliti`));
-
-        const extra = randomDelay();
-        const next  = new Date(Date.now() + extra).toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
-        log('WAIT', 'SISTEMA', `Ciclo completato! Prossimo tra ${formatTime(extra)} (alle ${next})`);
-        await sleep(extra);
     }
 }
 // ───────────────────────────────────────────────────────────
