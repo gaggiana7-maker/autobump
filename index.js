@@ -19,7 +19,7 @@ const ACCOUNTS = [
 ];
 
 const DISBOARD_ID        = '302050872383242240';
-const INTERVAL_MS        = 40 * 60 * 1000;
+const INTERVAL_MS        = 30 * 60 * 1000;
 const DELAY_MIN_MS       = 1  * 60 * 1000;
 const DELAY_MAX_MS       = 10 * 60 * 1000;
 const MAX_RETRIES        = 5;
@@ -212,7 +212,7 @@ async function bumpWithRetry(i) {
 async function mainLoop() {
     log('INFO', 'SISTEMA', '═══════════════════════════════════════');
     log('INFO', 'SISTEMA', '   DISBOARD AUTO BUMPER 4x AVVIATO    ');
-    log('INFO', 'SISTEMA', '   Intervallo tra bump: 40 minuti     ');
+    log('INFO', 'SISTEMA', '   Intervallo tra bump: 30 minuti     ');
     log('INFO', 'SISTEMA', '   Verifica risposta Disboard: ON     ');
     log('INFO', 'SISTEMA', '═══════════════════════════════════════');
 
