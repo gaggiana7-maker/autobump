@@ -84,61 +84,83 @@ async function loginAll() {
 // ───────────────────────────────────────────────────────────
 
 // ─── ASPETTA RISPOSTA DISBOARD ──────────────────────────────
-// Ritorna { confirmed: true } se Disboard conferma il bump
-// Ritorna { confirmed: false, cooldown: true } se c'è cooldown
-// Ritorna { confirmed: false, cooldown: false } se nessuna risposta
 function waitForDisboardResponse(client, channelId, label) {
     return new Promise(resolve => {
         const timeout = setTimeout(() => {
             client.removeListener('messageCreate', handler);
-            log('WARN', label, 'Nessuna risposta da Disboard in 10 secondi.');
-            resolve({ confirmed: false, cooldown: false });
+            log('WARN', label, 'Nessuna risposta da Disboard in 10 secondi — assumo riuscito.');
+            resolve({ confirmed: true, cooldown: false, cooldownMinutes: 0 });
         }, DISBOARD_WAIT_MS);
 
         function handler(message) {
-            // Controlla che il messaggio sia di Disboard nel canale giusto
             if (message.author.id !== DISBOARD_ID) return;
             if (message.channel.id !== channelId) return;
 
             clearTimeout(timeout);
             client.removeListener('messageCreate', handler);
 
-            const content = (message.content || '').toLowerCase();
-            const embed   = message.embeds?.[0];
-            const embedDesc = (embed?.description || embed?.title || '').toLowerCase();
-            const fullText  = content + ' ' + embedDesc;
+            const embed = message.embeds?.[0];
 
-            log('INFO', label, `Risposta Disboard: "${(embed?.description || message.content || '').slice(0, 80)}"`);
+            // Legge testo da tutte le possibili posizioni nell'embed
+            const parts = [
+                message.content || '',
+                embed?.description || '',
+                embed?.title || '',
+                ...(embed?.fields?.map(f => `${f.name} ${f.value}`) || []),
+            ];
+            const fullText = parts.join(' ').toLowerCase();
+            const preview  = (embed?.description || embed?.title || message.content || '').slice(0, 100);
+            log('INFO', label, `Disboard: "${preview}"`);
 
-            // Bump riuscito
+            // ── Bump riuscito ──
             if (
                 fullText.includes('bump done') ||
                 fullText.includes('bumped') ||
                 fullText.includes('bump effettuato') ||
                 fullText.includes('server bumped') ||
                 fullText.includes('successfully bumped') ||
-                fullText.includes(':thumbsup:') ||
+                fullText.includes('thumbsup') ||
                 fullText.includes('👍')
             ) {
-                resolve({ confirmed: true, cooldown: false });
+                resolve({ confirmed: true, cooldown: false, cooldownMinutes: 0 });
                 return;
             }
 
-            // Cooldown attivo
+            // ── Cooldown — estrae i minuti esatti ──
+            const cooldownMatch =
+                fullText.match(/(\d+)\s*minute/) ||
+                fullText.match(/(\d+)\s*minut/)  ||
+                fullText.match(/(\d+)\s*min/);
+
             if (
-                fullText.includes('wait') ||
+                fullText.includes('wait')     ||
                 fullText.includes('cooldown') ||
-                fullText.includes('aspetta') ||
-                fullText.includes('minutes') ||
-                fullText.includes('minuti')
+                fullText.includes('aspetta')  ||
+                fullText.includes('minute')   ||
+                fullText.includes('minuti')   ||
+                cooldownMatch
             ) {
-                resolve({ confirmed: false, cooldown: true });
+                const minutes = cooldownMatch ? parseInt(cooldownMatch[1], 10) : 0;
+                log('WARN', label, `Cooldown attivo${minutes ? ` — ancora ${minutes} minuti` : ''}. Salto questo account.`);
+                resolve({ confirmed: false, cooldown: true, cooldownMinutes: minutes });
                 return;
             }
 
-            // Risposta non riconosciuta — considera comunque come bump riuscito
-            log('WARN', label, 'Risposta Disboard non riconosciuta, assumo bump riuscito.');
-            resolve({ confirmed: true, cooldown: false });
+            // ── Disboard down / API error ──
+            if (
+                fullText.includes('down') ||
+                fullText.includes('try again') ||
+                fullText.includes('error') ||
+                fullText.includes('errore')
+            ) {
+                log('WARN', label, 'Disboard API down — salto e riprovo al prossimo ciclo.');
+                resolve({ confirmed: false, cooldown: false, cooldownMinutes: 0 });
+                return;
+            }
+
+            // ── Non riconosciuta ──
+            log('WARN', label, 'Risposta non riconosciuta — assumo riuscito.');
+            resolve({ confirmed: true, cooldown: false, cooldownMinutes: 0 });
         }
 
         client.on('messageCreate', handler);
@@ -179,13 +201,15 @@ async function doBump(i) {
     const response = await responsePromise;
 
     if (response.cooldown) {
-        log('WARN', acc.label, 'Disboard: cooldown attivo! Riprovo tra 5 minuti...');
-        await sleep(5 * 60 * 1000);
-        return { success: false, fatal: false };
+        // Non bloccare il loop — salta questo account e riprova al prossimo ciclo
+        stat.fails++;
+        return { success: false, fatal: false, skip: true };
     }
 
     if (!response.confirmed) {
-        log('WARN', acc.label, 'Bump inviato ma non confermato da Disboard. Conto come riuscito.');
+        // API down o risposta sconosciuta — non contare come bump riuscito
+        log('WARN', acc.label, 'Bump non confermato — non conto come riuscito.');
+        return { success: false, fatal: false };
     }
 
     stat.bumps++;
@@ -199,9 +223,10 @@ async function bumpWithRetry(i) {
             log('WARN', ACCOUNTS[i].label, `Tentativo ${attempt}/${MAX_RETRIES}...`);
             await sleep(RETRY_DELAY_MS);
         }
-        const { success, fatal } = await doBump(i);
+        const { success, fatal, skip } = await doBump(i);
         if (success) return;
         if (fatal)   { process.exit(1); }
+        if (skip)    { log('WARN', ACCOUNTS[i].label, 'Skip — cooldown attivo, riprovo al prossimo ciclo.'); return; }
     }
     stats[i].fails++;
     log('ERROR', ACCOUNTS[i].label, `Bump fallito dopo ${MAX_RETRIES} tentativi.`);
